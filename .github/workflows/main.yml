@@ -1,0 +1,284 @@
+name: Build Interexive - Easy APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Prepare HTML app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f index.html ]; then
+            HTML_FILE=index.html
+          else
+            mapfile -t FILES < <(find . -maxdepth 1 -type f -iname '*.html')
+            if [ "${#FILES[@]}" -ne 1 ]; then
+              echo "ERROR: Add one HTML file to the repository root, or name it index.html."
+              exit 1
+            fi
+            HTML_FILE="${FILES[0]}"
+          fi
+
+          mkdir -p www
+          rsync -a --exclude='.git/' --exclude='.github/' --exclude='www/' --exclude='android/' --exclude='node_modules/' --exclude='package.json' --exclude='package-lock.json' --exclude='capacitor.config.json' ./ www/
+          cp "$HTML_FILE" www/index.html
+
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+          npm install --save-dev @capacitor/assets
+
+          cat > capacitor.config.json <<'CAPACITOR_EOF'
+          {
+            "appId": "com.interexive.easy",
+            "appName": "Interexive - Easy",
+            "webDir": "www"
+          }
+          CAPACITOR_EOF
+
+          mkdir -p assets
+          test -f logo.png || { echo "ERROR: logo.png missing from repository root"; exit 1; }
+          cp logo.png assets/icon.png
+
+          if [ ! -d android ]; then
+            npx cap add android
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          gradle_file = Path("android/app/build.gradle")
+          content = gradle_file.read_text()
+          dependency = 'implementation "com.unity3d.ads:unity-ads:4.21.0"'
+
+          if dependency not in content:
+              if "dependencies {" not in content:
+                  raise SystemExit("Could not find dependencies block in app/build.gradle")
+              content = content.replace(
+                  "dependencies {",
+                  "dependencies {\n    " + dependency,
+                  1
+              )
+              gradle_file.write_text(content)
+              print("Unity Ads SDK dependency added.")
+          else:
+              print("Unity Ads SDK dependency already present.")
+          PY
+
+          npx cap sync android
+          npx @capacitor/assets generate --android
+
+      - name: Integrate automatic Unity banner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          files = list(Path("android/app/src/main/java").rglob("MainActivity.java"))
+          if len(files) != 1:
+              raise SystemExit(f"Expected one MainActivity.java, found {len(files)}")
+
+          path = files[0]
+          original = path.read_text()
+          match = re.search(r"^package\s+([\w.]+)\s*;", original, re.M)
+          if not match:
+              raise SystemExit("Cannot find Java package declaration")
+          package = match.group(1)
+
+          java = r'''package __PACKAGE__;
+
+          import android.os.Bundle;
+          import android.util.Log;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import androidx.annotation.OptIn;
+
+          import com.getcapacitor.BridgeActivity;
+          import com.unity3d.ads.BannerAd;
+          import com.unity3d.ads.BannerConfiguration;
+          import com.unity3d.ads.BannerShowListener;
+          import com.unity3d.ads.BannerSize;
+          import com.unity3d.ads.InitializationConfiguration;
+          import com.unity3d.ads.UnityAds;
+          import com.unity3d.ads.UnityAdsError;
+          import com.unity3d.ads.UnityAdsExperimental;
+
+          @OptIn(markerClass = UnityAdsExperimental.class)
+          public class MainActivity extends BridgeActivity {
+              private static final String GAME_ID = "800409689";
+              private static final String BANNER_ID = "BP_Banner_Android";
+
+              private BannerAd bannerAd;
+              private FrameLayout bannerSlot;
+              private boolean bannerLoadStarted = false;
+
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  initializeUnityAds();
+              }
+
+              private void initializeUnityAds() {
+                  InitializationConfiguration config =
+                      new InitializationConfiguration.Builder(GAME_ID)
+                          .withTestMode(false)
+                          .build();
+
+                  UnityAds.initialize(config, error -> {
+                      if (error != null) {
+                          Log.e("UnityAds", "Initialization failed: " + error.getMessage());
+                          return;
+                      }
+                      Log.d("UnityAds", "Initialization successful; loading banner.");
+                      runOnUiThread(this::loadBanner);
+                  });
+              }
+
+              @OptIn(markerClass = UnityAdsExperimental.class)
+              private void loadBanner() {
+                  if (bannerLoadStarted) return;
+                  bannerLoadStarted = true;
+
+                  BannerShowListener showListener = new BannerShowListener() {
+                      @Override
+                      public void onImpression(BannerAd ad) {
+                          Log.d("UnityAds", "Banner impression recorded.");
+                      }
+
+                      @Override
+                      public void onClicked(BannerAd ad) {
+                          Log.d("UnityAds", "Banner clicked.");
+                      }
+
+                      @Override
+                      public void onFailedToShow(BannerAd ad, UnityAdsError error) {
+                          Log.e("UnityAds", "Banner failed to show: " + error.getMessage());
+                      }
+                  };
+
+                  BannerConfiguration config = new BannerConfiguration.Builder(
+                      BANNER_ID, new BannerSize(320, 50), showListener
+                  ).build();
+
+                  BannerAd.load(config, (loaded, error) -> {
+                      if (loaded == null || error != null) {
+                          Log.e("UnityAds", "Banner load failed: " +
+                              (error == null ? "No ad was returned" : error.getMessage()));
+                          return;
+                      }
+                      runOnUiThread(() -> displayBanner(loaded));
+                  });
+              }
+
+              private void displayBanner(BannerAd loaded) {
+                  View adView = loaded.getView();
+                  if (adView == null) {
+                      Log.e("UnityAds", "Banner view is null.");
+                      return;
+                  }
+
+                  FrameLayout root = findViewById(android.R.id.content);
+                  if (root == null) {
+                      Log.e("UnityAds", "Android content view was not found.");
+                      return;
+                  }
+
+                  bannerAd = loaded;
+
+                  if (bannerSlot != null && bannerSlot.getParent() instanceof ViewGroup) {
+                      ((ViewGroup) bannerSlot.getParent()).removeView(bannerSlot);
+                  }
+
+                  int height = Math.round(50 * getResources().getDisplayMetrics().density);
+                  bannerSlot = new FrameLayout(MainActivity.this);
+                  FrameLayout.LayoutParams slotParams = new FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      height,
+                      Gravity.BOTTOM
+                  );
+                  root.addView(bannerSlot, slotParams);
+
+                  if (adView.getParent() instanceof ViewGroup) {
+                      ((ViewGroup) adView.getParent()).removeView(adView);
+                  }
+
+                  FrameLayout.LayoutParams adParams = new FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      Gravity.CENTER
+                  );
+                  bannerSlot.addView(adView, adParams);
+                  bannerSlot.setVisibility(View.VISIBLE);
+                  bannerSlot.bringToFront();
+                  Log.d("UnityAds", "Banner view added to bottom of app.");
+              }
+          }
+          '''
+
+          path.write_text(java.replace("__PACKAGE__", package))
+
+          html_path = Path("www/index.html")
+          html = html_path.read_text()
+          marker = "<!-- UNITY_AUTO_BANNER_SPACING -->"
+          addon = r'''<!-- UNITY_AUTO_BANNER_SPACING -->
+          <style id="unity-auto-banner-spacing">
+            body { padding-bottom: 72px !important; box-sizing: border-box; }
+          </style>
+          '''
+
+          if marker not in html:
+              if re.search(r"</body\s*>", html, re.I):
+                  html = re.sub(r"</body\s*>", addon + "\n</body>", html,
+                                count=1, flags=re.I)
+              else:
+                  html += "\n" + addon
+              html_path.write_text(html)
+
+          print("Automatic banner integration generated; no ad buttons or timers added.")
+          PY
+
+          npx cap copy android
+
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Interexive-Easy-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          
