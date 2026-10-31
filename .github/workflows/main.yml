@@ -426,15 +426,111 @@ jobs:
           PY
 
           npx cap copy android
+      - name: Build Signed APK
+        shell: bash
+        env:
+          SIGNING_SECRET_KEY_ETC: ${{ secrets.SIGNING_SECRET_KEY_ETC }}
+          KEYSTORE_PASSWORD: ${{ secrets.ALIAS____JJKS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          BUILD_NUMBER: ${{ github.run_number }}
 
-      - name: Build APK
         run: |
+          set -euo pipefail
+
+          : "${SIGNING_SECRET_KEY_ETC:?Missing signing key}"
+          : "${KEYSTORE_PASSWORD:?Missing keystore password}"
+          : "${KEY_ALIAS:?Missing key alias}"
+          : "${KEY_PASSWORD:?Missing key password}"
+
+          export KEYSTORE_FILE="$RUNNER_TEMP/release-key.jks"
+
+          printf '%s' "$SIGNING_SECRET_KEY_ETC" | base64 --decode > "$KEYSTORE_FILE"
+
+          test -s "$KEYSTORE_FILE"
+
+          keytool -list \
+            -keystore "$KEYSTORE_FILE" \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -alias "$KEY_ALIAS" > /dev/null
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          gradle_file = Path("android/app/build.gradle")
+          content = gradle_file.read_text()
+
+          android_block = re.search(r'(?m)^(\s*)android\s*\{', content)
+          if not android_block:
+              raise SystemExit("Android block not found")
+
+          if not re.search(r'(?m)^\s*signingConfigs\s*\{', content):
+              signing_block = """
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("KEYSTORE_FILE"))
+                      storePassword System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASSWORD")
+                  }
+              }
+          """
+              content = (
+                  content[:android_block.end()]
+                  + signing_block
+                  + content[android_block.end():]
+              )
+
+          build_types = re.search(r'(?m)^(\s*)buildTypes\s*\{', content)
+          if not build_types:
+              raise SystemExit("buildTypes block not found")
+
+          release_block = re.search(
+              r'(?m)^(\s*)release\s*\{',
+              content[build_types.end():]
+          )
+
+          if not release_block:
+              raise SystemExit("release block not found")
+
+          if not re.search(
+              r'\bsigningConfig\s+signingConfigs\.release\b',
+              content
+          ):
+              position = build_types.end() + release_block.end()
+              indent = release_block.group(1) + "    "
+              content = (
+                  content[:position]
+                  + "\n"
+                  + indent
+                  + "signingConfig signingConfigs.release"
+                  + content[position:]
+              )
+
+          version_code = 1000 + int(os.environ["BUILD_NUMBER"])
+
+          content, count = re.subn(
+              r'(?m)^(\s*versionCode\s+)\d+\s*$',
+              lambda match: match.group(1) + str(version_code),
+              content,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit("versionCode not found")
+
+          gradle_file.write_text(content)
+          print("Release signing and version code configured.")
+          PY
+
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Interexive-Easy-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
