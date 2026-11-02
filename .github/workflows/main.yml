@@ -357,10 +357,14 @@ jobs:
                                   @Override public void onStarted(RewardedAd ad) {}
                                   @Override public void onClicked(RewardedAd ad) {}
                                   @Override public void onCompleted(RewardedAd ad, ShowFinishState state) {
+                                      if (state == ShowFinishState.SKIPPED) {
+                                          fireEvent("unityRewardFailed");
+                                      }
                                       loadRewarded();
                                   }
                                   @Override public void onFailed(RewardedAd ad, UnityAdsError error) {
                                       Log.e("UnityAds", "Rewarded show failed: " + error.getMessage());
+                                      fireEvent("unityRewardFailed");
                                       loadRewarded();
                                   }
                                   @Override public void onRewarded(RewardedAd ad) {
@@ -379,50 +383,130 @@ jobs:
           html = html_path.read_text()
           marker = "<!-- UNITY_ADS_CONTROL_PANEL -->"
           addon = r'''
-          <!-- UNITY_ADS_CONTROL_PANEL -->
+          <!-- INTEREXIVE_ADS_START -->
           <style>
             body { padding-bottom: 72px !important; }
-            #unity-ads-controls {
-              position: fixed; right: 8px; bottom: 58px;
-              z-index: 2147483647; display: flex; gap: 6px;
-            }
-            #unity-ads-controls button {
-              padding: 7px 10px; border: 1px solid #ccc;
-              border-radius: 18px; background: white; color: #222;
-              font-size: 12px;
-            }
+            #unity-ads-controls { position: fixed; right: 8px; bottom: 58px; z-index: 2147483000; display: flex; gap: 6px; }
+            #unity-ads-controls button { padding: 8px 11px; border: 1px solid #ccc; border-radius: 18px; background: white; color: #222; font-size: 12px; }
+            #ie-reward-popup { position: fixed; inset: 0; z-index: 2147483647; display: none; align-items: center; justify-content: center; box-sizing: border-box; padding: 18px; background: rgba(0,0,0,.72); font-family: Arial,sans-serif; }
+            #ie-reward-card { width: 100%; max-width: 340px; box-sizing: border-box; padding: 24px 18px; border-radius: 16px; background: #082b66; color: #fff; text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
+            #ie-reward-card h2 { margin: 0 0 12px; font-size: 21px; }
+            #ie-reward-card p { margin: 10px 0; }
+            #ie-reward-card button { display: block; width: 100%; box-sizing: border-box; margin-top: 10px; padding: 13px 10px; border: 0; border-radius: 8px; background: #fff; color: #082b66; font-size: 14px; font-weight: 700; }
+            #ie-reward-card button:disabled { opacity: .45; }
+            #ie-reward-card #ie-reward-continue { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.8); }
           </style>
+          <div id="ie-reward-popup" role="dialog" aria-modal="true" aria-labelledby="ie-reward-title">
+            <div id="ie-reward-card">
+              <h2 id="ie-reward-title">Watch 2 Rewarded Ads for 10 Hours</h2>
+              <p id="ie-reward-count">0 out of 2</p>
+              <button type="button" id="ie-reward-ad1">Watch Rewarded Ad 1</button>
+              <button type="button" id="ie-reward-ad2" disabled>Watch Rewarded Ad 2</button>
+              <p id="ie-reward-message">Complete both ads to receive 10 hours of access.</p>
+              <button type="button" id="ie-reward-continue">Continue without reward</button>
+            </div>
+          </div>
           <div id="unity-ads-controls">
             <button type="button" id="unity-reward-btn">Reward Ad</button>
             <button type="button" id="unity-interstitial-btn">Full-screen Ad</button>
           </div>
           <script>
           (function () {
-            document.getElementById("unity-reward-btn").onclick = function () {
+            'use strict';
+            var popup = document.getElementById('ie-reward-popup');
+            var countText = document.getElementById('ie-reward-count');
+            var message = document.getElementById('ie-reward-message');
+            var firstButton = document.getElementById('ie-reward-ad1');
+            var secondButton = document.getElementById('ie-reward-ad2');
+            var count = parseInt(localStorage.getItem('ieRewardCount') || '0', 10);
+            var unlockUntil = parseInt(localStorage.getItem('ieRewardUnlockUntil') || '0', 10);
+            var busy = false;
+            var popupAdPending = false;
+            if (!Number.isFinite(count) || count < 0 || count > 1) count = 0;
+            if (!Number.isFinite(unlockUntil)) unlockUntil = 0;
+            if (unlockUntil > 0 && unlockUntil <= Date.now()) {
+              localStorage.removeItem('ieRewardUnlockUntil');
+              localStorage.removeItem('ieRewardCount');
+              count = 0; unlockUntil = 0;
+            }
+            function draw() {
+              countText.textContent = count + ' out of 2';
+              firstButton.textContent = count >= 1 ? 'Rewarded Ad 1 completed' : 'Watch Rewarded Ad 1';
+              secondButton.textContent = count >= 2 ? 'Rewarded Ad 2 completed' : 'Watch Rewarded Ad 2';
+              firstButton.disabled = busy || count >= 1;
+              secondButton.disabled = busy || count < 1 || count >= 2;
+            }
+            function startPopupAd() {
+              if (busy || count >= 2) return;
+              if (!window.UnityAdsBridge || typeof window.UnityAdsBridge.showRewarded !== 'function') {
+                message.textContent = 'Unity Ads connection is unavailable. Please try again later.'; return;
+              }
+              busy = true; popupAdPending = true; message.textContent = 'Loading rewarded ad...'; draw();
+              try { window.UnityAdsBridge.showRewarded(); }
+              catch (error) { busy = false; popupAdPending = false; message.textContent = 'Could not start the ad. Please try again.'; draw(); }
+            }
+            firstButton.addEventListener('click', startPopupAd);
+            secondButton.addEventListener('click', startPopupAd);
+            document.getElementById('ie-reward-continue').addEventListener('click', function () { popup.style.display = 'none'; });
+            window.addEventListener('unityAdNotReady', function () {
+              if (popupAdPending) { popupAdPending = false; busy = false; message.textContent = 'Ad is loading. Please tap again in a few seconds.'; draw(); }
+              else alert('Ad is loading. Please try again in a few seconds.');
+            });
+            window.addEventListener('unityRewardFailed', function () {
+              if (!popupAdPending) return;
+              popupAdPending = false; busy = false; message.textContent = 'Ad was not completed. Please try again.'; draw();
+            });
+            window.addEventListener('unityRewardEarned', function () {
+              if (!popupAdPending) { alert('Rewarded ad completed.'); return; }
+              popupAdPending = false; busy = false; count += 1;
+              if (count >= 2) {
+                localStorage.setItem('ieRewardUnlockUntil', String(Date.now() + 10 * 60 * 60 * 1000));
+                localStorage.removeItem('ieRewardCount'); popup.style.display = 'none'; return;
+              }
+              localStorage.setItem('ieRewardCount', String(count));
+              message.textContent = 'First ad completed. Now watch the second ad.'; draw();
+            });
+            document.getElementById('unity-reward-btn').addEventListener('click', function () {
               if (window.UnityAdsBridge) window.UnityAdsBridge.showRewarded();
-            };
-            document.getElementById("unity-interstitial-btn").onclick = function () {
+            });
+            document.getElementById('unity-interstitial-btn').addEventListener('click', function () {
               if (window.UnityAdsBridge) window.UnityAdsBridge.showInterstitial();
-            };
-            window.addEventListener("unityAdNotReady", function () {
-              alert("Ad is loading. Please try again in a few seconds.");
             });
-            window.addEventListener("unityRewardEarned", function () {
-              alert("Rewarded ad completed.");
-            });
+            function checkUnlockExpiry() {
+              var savedUntil = parseInt(localStorage.getItem('ieRewardUnlockUntil') || '0', 10);
+              if (savedUntil > 0 && savedUntil <= Date.now()) {
+                localStorage.removeItem('ieRewardUnlockUntil');
+                localStorage.removeItem('ieRewardCount');
+                count = 0;
+                unlockUntil = 0;
+                draw();
+                popup.style.display = 'flex';
+              }
+            }
+            draw();
+            if (unlockUntil > Date.now()) {
+              window.setTimeout(checkUnlockExpiry, unlockUntil - Date.now());
+              window.addEventListener('focus', checkUnlockExpiry);
+              document.addEventListener('visibilitychange', function () {
+                if (!document.hidden) checkUnlockExpiry();
+              });
+            } else {
+              popup.style.display = 'flex';
+            }
           })();
           </script>
+          <!-- INTEREXIVE_ADS_END -->
           '''
 
-          if marker not in html:
-              if re.search(r"</body\s*>", html, re.I):
-                  html = re.sub(r"</body\s*>", addon + "\n</body>", html,
-                                count=1, flags=re.I)
-              else:
-                  html += addon
-              html_path.write_text(html)
-
-          print("Unity Ads integration generated.")
+          # Remove older injected panels/blocks to prevent duplicate element IDs.
+          html = re.sub(r'<!-- UNITY_ADS_CONTROL_PANEL -->.*?</script>\s*', '', html, flags=re.S)
+          html = re.sub(r'<!-- INTEREXIVE_ADS_START -->.*?<!-- INTEREXIVE_ADS_END -->\s*', '', html, flags=re.S)
+          if re.search(r'</body\s*>', html, re.I):
+              html = re.sub(r'</body\s*>', addon + "\n</body>", html, count=1, flags=re.I)
+          else:
+              html += addon
+          html_path.write_text(html)
+          print("Unity Ads integration and 10-hour rewarded popup generated.")
           PY
 
           npx cap copy android
