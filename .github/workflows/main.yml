@@ -403,7 +403,6 @@ jobs:
               <button type="button" id="ie-reward-ad1">Watch Rewarded Ad 1</button>
               <button type="button" id="ie-reward-ad2" disabled>Watch Rewarded Ad 2</button>
               <p id="ie-reward-message">Complete both ads to receive 10 hours of access.</p>
-              <button type="button" id="ie-reward-continue">Continue without reward</button>
             </div>
           </div>
           <div id="unity-ads-controls">
@@ -447,7 +446,6 @@ jobs:
             }
             firstButton.addEventListener('click', startPopupAd);
             secondButton.addEventListener('click', startPopupAd);
-            document.getElementById('ie-reward-continue').addEventListener('click', function () { popup.style.display = 'none'; });
             window.addEventListener('unityAdNotReady', function () {
               if (popupAdPending) { popupAdPending = false; busy = false; message.textContent = 'Ad is loading. Please tap again in a few seconds.'; draw(); }
               else alert('Ad is loading. Please try again in a few seconds.');
