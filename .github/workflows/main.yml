@@ -474,7 +474,7 @@ jobs:
             document.getElementById('unity-interstitial-btn').addEventListener('click', function () {
               if (window.UnityAdsBridge) window.UnityAdsBridge.showInterstitial();
             });
-            // Give the first 5 minutes only once, and save the deadline immediately.
+            // Give the first 3 minutes only once, and save the deadline immediately.
             // This makes closing/reopening the app unable to restart the free period.
             if (localStorage.getItem('ieInitialGraceUsed') !== '1') {
               var previousUnlock = parseInt(localStorage.getItem('ieRewardUnlockUntil') || '0', 10);
@@ -482,7 +482,7 @@ jobs:
               if (Number.isFinite(previousUnlock) && previousUnlock > Date.now()) {
                 localStorage.setItem('ieInitialGraceUntil', '0');
               } else {
-                localStorage.setItem('ieInitialGraceUntil', String(Date.now() + 5 * 60 * 1000));
+                localStorage.setItem('ieInitialGraceUntil', String(Date.now() + 3 * 60 * 1000));
               }
             }
 
