@@ -431,4 +431,237 @@ jobs:
             function draw() {
               countText.textContent = count + ' out of 2';
               firstButton.textContent = count >= 1 ? 'Rewarded Ad 1 completed' : 'Watch Rewarded Ad 1';
-              secondButton.textContent = count >= 2 ? 'Rewarded Ad 2 completed' : 
+              secondButton.textContent = count >= 2 ? 'Rewarded Ad 2 completed' : 'Watch Rewarded Ad 2';
+              firstButton.disabled = busy || count >= 1;
+              secondButton.disabled = busy || count < 1 || count >= 2;
+            }
+            function startPopupAd() {
+              if (busy || count >= 2) return;
+              if (!window.UnityAdsBridge || typeof window.UnityAdsBridge.showRewarded !== 'function') {
+                message.textContent = 'Unity Ads connection is unavailable. Please try again later.'; return;
+              }
+              busy = true; popupAdPending = true; message.textContent = 'Loading rewarded ad...'; draw();
+              try { window.UnityAdsBridge.showRewarded(); }
+              catch (error) { busy = false; popupAdPending = false; message.textContent = 'Could not start the ad. Please try again.'; draw(); }
+            }
+            firstButton.addEventListener('click', startPopupAd);
+            secondButton.addEventListener('click', startPopupAd);
+            window.addEventListener('unityAdNotReady', function () {
+              if (popupAdPending) { popupAdPending = false; busy = false; message.textContent = 'Ad is loading. Please tap again in a few seconds.'; draw(); }
+              else alert('Ad is loading. Please try again in a few seconds.');
+            });
+            window.addEventListener('unityRewardFailed', function () {
+              if (!popupAdPending) return;
+              popupAdPending = false; busy = false; message.textContent = 'Ad was not completed. Please try again.'; draw();
+            });
+            window.addEventListener('unityRewardEarned', function () {
+              if (!popupAdPending) { alert('Rewarded ad completed.'); return; }
+              popupAdPending = false; busy = false; count += 1;
+              if (count >= 2) {
+                localStorage.setItem('ieRewardUnlockUntil', String(Date.now() + 10 * 60 * 60 * 1000));
+                localStorage.removeItem('ieRewardCount');
+                count = 0;
+                draw();
+                checkAccess();
+                return;
+              }
+              localStorage.setItem('ieRewardCount', String(count));
+              message.textContent = 'First ad completed. Now watch the second ad.'; draw();
+            });
+            document.getElementById('unity-reward-btn').addEventListener('click', function () {
+              if (window.UnityAdsBridge) window.UnityAdsBridge.showRewarded();
+            });
+            document.getElementById('unity-interstitial-btn').addEventListener('click', function () {
+              if (window.UnityAdsBridge) window.UnityAdsBridge.showInterstitial();
+            });
+            // Give the first 5 minutes only once, and save the deadline immediately.
+            // This makes closing/reopening the app unable to restart the free period.
+            if (localStorage.getItem('ieInitialGraceUsed') !== '1') {
+              var previousUnlock = parseInt(localStorage.getItem('ieRewardUnlockUntil') || '0', 10);
+              localStorage.setItem('ieInitialGraceUsed', '1');
+              if (Number.isFinite(previousUnlock) && previousUnlock > Date.now()) {
+                localStorage.setItem('ieInitialGraceUntil', '0');
+              } else {
+                localStorage.setItem('ieInitialGraceUntil', String(Date.now() + 5 * 60 * 1000));
+              }
+            }
+
+            var accessTimer = null;
+            function scheduleAccessCheck(delay) {
+              if (accessTimer !== null) window.clearTimeout(accessTimer);
+              accessTimer = window.setTimeout(function () {
+                accessTimer = null;
+                checkAccess();
+              }, Math.max(0, delay) + 50);
+            }
+
+            function checkAccess() {
+              if (accessTimer !== null) {
+                window.clearTimeout(accessTimer);
+                accessTimer = null;
+              }
+
+              var now = Date.now();
+              var savedUntil = parseInt(localStorage.getItem('ieRewardUnlockUntil') || '0', 10);
+              if (!Number.isFinite(savedUntil) || savedUntil < 0) savedUntil = 0;
+
+              // A valid 10-hour reward always takes priority over the first-run timer.
+              if (savedUntil > now) {
+                unlockUntil = savedUntil;
+                popup.style.display = 'none';
+                scheduleAccessCheck(savedUntil - now);
+                return;
+              }
+
+              // Expired 10-hour access: clear it and require the ads again.
+              if (savedUntil > 0) {
+                localStorage.removeItem('ieRewardUnlockUntil');
+                localStorage.removeItem('ieRewardCount');
+                count = 0;
+                unlockUntil = 0;
+                draw();
+              }
+
+              var graceUntil = parseInt(localStorage.getItem('ieInitialGraceUntil') || '0', 10);
+              if (!Number.isFinite(graceUntil)) graceUntil = 0;
+              if (graceUntil > now) {
+                popup.style.display = 'none';
+                scheduleAccessCheck(graceUntil - now);
+                return;
+              }
+
+              // Grace period is over (or was already used): keep the ad gate visible.
+              popup.style.display = 'flex';
+            }
+
+            draw();
+            checkAccess();
+            window.addEventListener('focus', checkAccess);
+            document.addEventListener('visibilitychange', function () {
+              if (!document.hidden) checkAccess();
+            });
+          })();
+          </script>
+          <!-- INTEREXIVE_ADS_END -->
+          '''
+
+          # Remove older injected panels/blocks to prevent duplicate element IDs.
+          html = re.sub(r'<!-- UNITY_ADS_CONTROL_PANEL -->.*?</script>\s*', '', html, flags=re.S)
+          html = re.sub(r'<!-- INTEREXIVE_ADS_START -->.*?<!-- INTEREXIVE_ADS_END -->\s*', '', html, flags=re.S)
+          if re.search(r'</body\s*>', html, re.I):
+              html = re.sub(r'</body\s*>', addon + "\n</body>", html, count=1, flags=re.I)
+          else:
+              html += addon
+          html_path.write_text(html)
+          print("Unity Ads integration and 10-hour rewarded popup generated.")
+          PY
+
+          npx cap copy android
+      - name: Build Signed APK
+        shell: bash
+        env:
+          SIGNING_SECRET_KEY_ETC: ${{ secrets.SIGNING_SECRET_KEY_ETC }}
+          KEYSTORE_PASSWORD: ${{ secrets.ALIAS____JJKS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          BUILD_NUMBER: ${{ github.run_number }}
+
+        run: |
+          set -euo pipefail
+
+          : "${SIGNING_SECRET_KEY_ETC:?Missing signing key}"
+          : "${KEYSTORE_PASSWORD:?Missing keystore password}"
+          : "${KEY_ALIAS:?Missing key alias}"
+          : "${KEY_PASSWORD:?Missing key password}"
+
+          export KEYSTORE_FILE="$RUNNER_TEMP/release-key.jks"
+
+          printf '%s' "$SIGNING_SECRET_KEY_ETC" | base64 --decode > "$KEYSTORE_FILE"
+
+          test -s "$KEYSTORE_FILE"
+
+          keytool -list \
+            -keystore "$KEYSTORE_FILE" \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -alias "$KEY_ALIAS" > /dev/null
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          gradle_file = Path("android/app/build.gradle")
+          content = gradle_file.read_text()
+
+          android_block = re.search(r'(?m)^(\s*)android\s*\{', content)
+          if not android_block:
+              raise SystemExit("Android block not found")
+
+          if not re.search(r'(?m)^\s*signingConfigs\s*\{', content):
+              signing_block = """
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("KEYSTORE_FILE"))
+                      storePassword System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASSWORD")
+                  }
+              }
+          """
+              content = (
+                  content[:android_block.end()]
+                  + signing_block
+                  + content[android_block.end():]
+              )
+
+          build_types = re.search(r'(?m)^(\s*)buildTypes\s*\{', content)
+          if not build_types:
+              raise SystemExit("buildTypes block not found")
+
+          release_block = re.search(
+              r'(?m)^(\s*)release\s*\{',
+              content[build_types.end():]
+          )
+
+          if not release_block:
+              raise SystemExit("release block not found")
+
+          if not re.search(
+              r'\bsigningConfig\s+signingConfigs\.release\b',
+              content
+          ):
+              position = build_types.end() + release_block.end()
+              indent = release_block.group(1) + "    "
+              content = (
+                  content[:position]
+                  + "\n"
+                  + indent
+                  + "signingConfig signingConfigs.release"
+                  + content[position:]
+              )
+
+          version_code = 1000 + int(os.environ["BUILD_NUMBER"])
+
+          content, count = re.subn(
+              r'(?m)^(\s*versionCode\s+)\d+\s*$',
+              lambda match: match.group(1) + str(version_code),
+              content,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit("versionCode not found")
+
+          gradle_file.write_text(content)
+          print("Release signing and version code configured.")
+          PY
+
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Interexive-Easy-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
